@@ -18,21 +18,27 @@
  * @module commonGrpc/service
  */
 
-import {Abortable, BodyResponseCallback, DecorateRequestOptions, Service, ServiceConfig, util} from '@google-cloud/common';
-import {replaceProjectIdToken} from '@google-cloud/projectify';
-import {loadSync, PackageDefinition, ServiceDefinition} from '@grpc/proto-loader';
+import { Abortable, BodyResponseCallback, DecorateRequestOptions, Service, ServiceConfig, util } from '@google-cloud/common';
+import { replaceProjectIdToken } from '@google-cloud/projectify';
+import { loadSync, PackageDefinition, ServiceDefinition } from '@grpc/proto-loader';
 import * as duplexify from 'duplexify';
-import {EventEmitter} from 'events';
+import { EventEmitter } from 'events';
 import * as extend from 'extend';
 import * as grpc from 'grpc';
 import * as is from 'is';
 import * as r from 'request';
 import * as retryRequest from 'retry-request';
-import {Duplex} from 'stream';
+import { Duplex } from 'stream';
 import * as through from 'through2';
+import { ServiceOptions } from '@google-cloud/common';
+import { Compute, UserRefreshClient, JWT } from 'google-auth-library';
 
 export interface ServiceRequestCallback {
-  (err: Error|null, apiResponse?: r.Response): void;
+  (err: Error | null, apiResponse?: r.Response): void;
+}
+
+interface GrpcResponse extends Error, r.Response {
+  code: number;
 }
 
 export interface ProtoOpts {
@@ -43,8 +49,12 @@ export interface ProtoOpts {
   stream?: Duplex;
 }
 
-interface GrpcOptions {
+export interface GrpcOptions {
   deadline?: Date;
+}
+
+export interface ServiceOptionInterface extends ServiceOptions {
+  maxRetries?: number;
 }
 
 /**
@@ -60,7 +70,7 @@ export interface GrpcServiceConfig extends ServiceConfig {
    * class requires multiple services.
    */
   protoServices: {
-    [serviceName: string]: {path: string; service: string; baseUrl: string;};
+    [serviceName: string]: { path: string; service: string; baseUrl: string; };
   };
   customEndpoint: boolean;
 }
@@ -233,11 +243,17 @@ export class ObjectToStructConverter {
     this.seenObjects.add(obj);
     for (const prop in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, prop)) {
-        const value = obj[prop];
+        const value = (Object.getOwnPropertyDescriptor(obj, prop) as PropertyDescriptor).value; //obj[prop];
         if (is.undefined(value)) {
           continue;
         }
-        convertedObject.fields[prop] = this.encodeValue_(value);
+        const objPropertyDescriptor: PropertyDescriptor = {
+          value: this.encodeValue_(value),
+          configurable: true,
+          enumerable: true,
+          writable: true
+        };
+        Object.defineProperty(convertedObject.fields, prop, objPropertyDescriptor);
       }
     }
     this.seenObjects.delete(obj);
@@ -318,14 +334,14 @@ export class ObjectToStructConverter {
 
 export class GrpcService extends Service {
   grpcCredentials?: {};
-  grpcMetadata?: {add: Function};
+  grpcMetadata?: { add: Function };
   maxRetries?: number;
   userAgent?: string;
   activeServiceMap_ = new Map();
   protos = {};
 
   /** A cache for proto objects. */
-  private static protoObjectCache: {[name: string]: PackageDefinition} = {};
+  private static protoObjectCache: { [name: string]: PackageDefinition } = {};
 
   static readonly GRPC_SERVICE_OPTIONS = GRPC_SERVICE_OPTIONS;
   static readonly GRPC_ERROR_CODE_TO_HTTP = GRPC_ERROR_CODE_TO_HTTP;
@@ -344,15 +360,15 @@ export class GrpcService extends Service {
    * @param config - Configuration object.
    * @param {object} options - [Configuration object](#/docs/?method=gcloud).
    */
-  constructor(config: GrpcServiceConfig, options) {
+  constructor(config: GrpcServiceConfig, options: ServiceOptionInterface) {
     super(config, options);
 
-    if (global['GCLOUD_SANDBOX_ENV']) {
+    if (global.hasOwnProperty('GCLOUD_SANDBOX_ENV')) {
       // gRPC has a tendency to cause our doc unit tests to fail, so we prevent
       // any calls to that library from going through.
       // Reference:
       // https://github.com/GoogleCloudPlatform/google-cloud-node/pull/1137#issuecomment-193315047
-      return global['GCLOUD_SANDBOX_ENV'];
+      return (Object.getOwnPropertyDescriptor(global, 'GCLOUD_SANDBOX_ENV') as PropertyDescriptor).value;
     }
 
     if (config.customEndpoint) {
@@ -370,7 +386,9 @@ export class GrpcService extends Service {
     if (config.grpcMetadata) {
       for (const prop in config.grpcMetadata) {
         if (config.grpcMetadata.hasOwnProperty(prop)) {
-          this.grpcMetadata.add(prop, config.grpcMetadata[prop]);
+          this.grpcMetadata.add(prop
+            , (Object.getOwnPropertyDescriptor(config.grpcMetadata, prop) as PropertyDescriptor)
+              .value);
         }
       }
     }
@@ -385,12 +403,18 @@ export class GrpcService extends Service {
       const protoConfig = protoServices[name];
       const services = this.loadProtoFile(protoConfig.path, config);
       const serviceKey =
-          ['google', protoConfig.service, name].filter(x => x).join('.');
+        ['google', protoConfig.service, name].filter(x => x).join('.');
       const service = services[serviceKey] as ServiceDefinition & {
         baseUrl?: string;
       };
 
-      this.protos[name] = service;
+      const objPropertyDescriptor: PropertyDescriptor = {
+        value: service,
+        configurable: true,
+        enumerable: true,
+        writable: true
+      };
+      Object.defineProperty(this.protos, name, objPropertyDescriptor);
 
       if (protoConfig.baseUrl) {
         service.baseUrl = protoConfig.baseUrl;
@@ -411,16 +435,16 @@ export class GrpcService extends Service {
    */
   request(reqOpts: DecorateRequestOptions): Promise<r.Response>;
   request(reqOpts: DecorateRequestOptions, callback: BodyResponseCallback):
-      void;
+    void;
   request(reqOpts: DecorateRequestOptions, callback?: BodyResponseCallback):
-      void|Promise<r.Response>;
+    void | Promise<r.Response>;
   request(
-      protoOpts: ProtoOpts, reqOpts: DecorateRequestOptions,
-      callback: ServiceRequestCallback): Abortable|void;
+    protoOpts: ProtoOpts, reqOpts: DecorateRequestOptions,
+    callback: ServiceRequestCallback): Abortable | void;
   request(
-      pOpts: ProtoOpts|DecorateRequestOptions,
-      rOpts?: DecorateRequestOptions|BodyResponseCallback,
-      callback?: ServiceRequestCallback): Abortable|void|Promise<r.Response> {
+    pOpts: ProtoOpts | DecorateRequestOptions,
+    rOpts?: DecorateRequestOptions | BodyResponseCallback,
+    callback?: ServiceRequestCallback): Abortable | void | Promise<r.Response> {
     /**
      * The function signature above is a little funky.  This is due to the way
      * method overloading in TypeScript operates.  Since this class extends
@@ -435,13 +459,14 @@ export class GrpcService extends Service {
     const protoOpts = pOpts as ProtoOpts;
     let reqOpts = rOpts as DecorateRequestOptions;
 
-    if (global['GCLOUD_SANDBOX_ENV']) {
-      return global['GCLOUD_SANDBOX_ENV'];
+    if (global.hasOwnProperty('GCLOUD_SANDBOX_ENV')) {
+      return (Object.getOwnPropertyDescriptor(global, 'GCLOUD_SANDBOX_ENV') as PropertyDescriptor)
+        .value;
     }
 
     if (!this.grpcCredentials) {
       // We must establish an authClient to give to grpc.
-      this.getGrpcCredentials_((err, credentials) => {
+      this.getGrpcCredentials_((err: Error, credentials: {}) => {
         if (err) {
           callback!(err);
           return;
@@ -472,45 +497,45 @@ export class GrpcService extends Service {
     // Retains a reference to an error from the response. If the final callback
     // is executed with this as the "response", we return it to the user as an
     // error.
-    let respError;
+    let respError: Error | null;
 
     const retryOpts = Object.assign(
-        {
-          retries: this.maxRetries,
-          currentRetryAttempt: 0,
-          shouldRetryFn: GrpcService.shouldRetryRequest_,
+      {
+        retries: this.maxRetries,
+        currentRetryAttempt: 0,
+        shouldRetryFn: GrpcService.shouldRetryRequest_,
 
-          // retry-request determines if it should retry from the incoming HTTP
-          // response status. gRPC always returns an error proto message. We
-          // pass that "error" into retry-request to act as the HTTP response,
-          // so it can use the status code to determine if it should retry.
-          request(_, onResponse) {
-            respError = null;
-            return service[protoOpts.method](
-                reqOpts, metadata, grpcOpts, (err, resp) => {
-                  if (err) {
-                    respError = GrpcService.decorateError_(err);
+        // retry-request determines if it should retry from the incoming HTTP
+        // response status. gRPC always returns an error proto message. We
+        // pass that "error" into retry-request to act as the HTTP response,
+        // so it can use the status code to determine if it should retry.
+        request(_: {}, onResponse: Function) {
+          respError = null;
+          return service[protoOpts.method](
+            reqOpts, metadata, grpcOpts, (err: GrpcResponse, resp: {}) => {
+              if (err) {
+                respError = GrpcService.decorateError_(err);
 
-                    if (respError) {
-                      onResponse(null, respError);
-                      return;
-                    }
-                    onResponse(err, resp);
-                    return;
-                  }
+                if (respError) {
+                  onResponse(null, respError);
+                  return;
+                }
+                onResponse(err, resp);
+                return;
+              }
 
-                  onResponse(null, resp);
-                });
-          },
+              onResponse(null, resp);
+            });
         },
-        protoOpts.retryOpts);
+      },
+      protoOpts.retryOpts);
 
-    return retryRequest(null!, retryOpts, (err, resp) => {
+    return retryRequest(null!, retryOpts, (err: Error, resp: {}) => {
       if (!err && resp === respError) {
         err = respError;
         resp = null!;
       }
-      callback!(err, resp);
+      callback!(err, resp as r.Response);
     });
   }
 
@@ -527,8 +552,8 @@ export class GrpcService extends Service {
   requestStream(reqOpts: DecorateRequestOptions): r.Request;
   requestStream(protoOpts: ProtoOpts, reqOpts: DecorateRequestOptions): Duplex;
   requestStream(
-      pOpts: ProtoOpts|DecorateRequestOptions,
-      rOpts?: DecorateRequestOptions): Duplex|r.Request {
+    pOpts: ProtoOpts | DecorateRequestOptions,
+    rOpts?: DecorateRequestOptions): Duplex | r.Request {
     /**
      * The function signature above is a little funky.  This is due to the way
      * method overloading in TypeScript operates.  Since this class extends
@@ -540,7 +565,7 @@ export class GrpcService extends Service {
      *
      * Hence the weird casting below.
      */
-    if (global['GCLOUD_SANDBOX_ENV']) {
+    if (global.hasOwnProperty('GCLOUD_SANDBOX_ENV')) {
       return through.obj();
     }
     const protoOpts = pOpts as ProtoOpts;
@@ -554,7 +579,7 @@ export class GrpcService extends Service {
 
     if (!this.grpcCredentials) {
       // We must establish an authClient to give to grpc.
-      this.getGrpcCredentials_((err, credentials) => {
+      this.getGrpcCredentials_((err: Error, credentials: {}) => {
         if (err) {
           stream.destroy(err);
           return;
@@ -584,40 +609,40 @@ export class GrpcService extends Service {
     }
 
     const retryOpts = Object.assign(
-        {
-          retries: this.maxRetries,
-          currentRetryAttempt: 0,
-          objectMode,
-          shouldRetryFn: GrpcService.shouldRetryRequest_,
+      {
+        retries: this.maxRetries,
+        currentRetryAttempt: 0,
+        objectMode,
+        shouldRetryFn: GrpcService.shouldRetryRequest_,
 
-          request() {
-            const ee: EventEmitter =
-                service[protoOpts.method](reqOpts, grpcMetadata, grpcOpts)
-                    .on('metadata', () => {
-                      // retry-request requires a server response before it
-                      // starts emitting data. The closest mechanism grpc
-                      // provides is a metadata event, but this does not provide
-                      // any kind of response status. So we're faking it here
-                      // with code `0` which translates to HTTP 200.
-                      //
-                      // https://github.com/GoogleCloudPlatform/google-cloud-node/pull/1444#discussion_r71812636
-                      const grcpStatus = GrpcService.decorateStatus_({code: 0});
-                      ee.emit('response', grcpStatus);
-                    });
-            return ee;
-          },
+        request() {
+          const ee: EventEmitter =
+            service[protoOpts.method](reqOpts, grpcMetadata, grpcOpts)
+              .on('metadata', () => {
+                // retry-request requires a server response before it
+                // starts emitting data. The closest mechanism grpc
+                // provides is a metadata event, but this does not provide
+                // any kind of response status. So we're faking it here
+                // with code `0` which translates to HTTP 200.
+                //
+                // https://github.com/GoogleCloudPlatform/google-cloud-node/pull/1444#discussion_r71812636
+                const grcpStatus = GrpcService.decorateStatus_({ code: 0 } as GrpcResponse);
+                ee.emit('response', grcpStatus);
+              });
+          return ee;
         },
-        protoOpts.retryOpts);
+      },
+      protoOpts.retryOpts);
 
     // tslint:disable-next-line:no-any
     return (retryRequest(null!, retryOpts) as any)
-        .on('error',
-            err => {
-              const grpcError = GrpcService.decorateError_(err);
-              stream.destroy(grpcError || err);
-            })
-        .on('request', stream.emit.bind(stream, 'request'))
-        .pipe(stream);
+      .on('error',
+        (err: GrpcResponse) => {
+          const grpcError = GrpcService.decorateError_(err);
+          stream.destroy(grpcError || err);
+        })
+      .on('request', stream.emit.bind(stream, 'request'))
+      .pipe(stream);
   }
 
   /**
@@ -630,12 +655,12 @@ export class GrpcService extends Service {
    *     request cancel.
    * @param {object} reqOpts - The request options.
    */
-  requestWritableStream(protoOpts, reqOpts) {
+  requestWritableStream(protoOpts: ProtoOpts, reqOpts: DecorateRequestOptions) {
     const stream =
-        // tslint:disable-next-line:no-any
-        (protoOpts.stream = protoOpts.stream || (duplexify as any).obj());
+      // tslint:disable-next-line:no-any
+      (protoOpts.stream = protoOpts.stream || (duplexify as any).obj());
 
-    if (global['GCLOUD_SANDBOX_ENV']) {
+    if (global.hasOwnProperty('GCLOUD_SANDBOX_ENV')) {
       return stream;
     }
 
@@ -643,7 +668,7 @@ export class GrpcService extends Service {
 
     if (!this.grpcCredentials) {
       // We must establish an authClient to give to grpc.
-      this.getGrpcCredentials_((err, credentials) => {
+      this.getGrpcCredentials_((err: Error, credentials: {}) => {
         if (err) {
           stream.destroy(err);
           return;
@@ -660,7 +685,7 @@ export class GrpcService extends Service {
     const grpcMetadata = this.grpcMetadata;
     const grpcOpts: GrpcOptions = {};
 
-    if (is.number(protoOpts.timeout)) {
+    if (protoOpts.timeout && is.number(protoOpts.timeout)) {
       grpcOpts.deadline = GrpcService.createDeadline_(protoOpts.timeout);
     }
 
@@ -674,16 +699,16 @@ export class GrpcService extends Service {
     }
 
     const grpcStream =
-        service[protoOpts.method](reqOpts, grpcMetadata, grpcOpts)
-            .on('status',
-                status => {
-                  const grcpStatus = GrpcService.decorateStatus_(status);
-                  stream.emit('response', grcpStatus || status);
-                })
-            .on('error', err => {
-              const grpcError = GrpcService.decorateError_(err);
-              stream.destroy(grpcError || err);
-            });
+      service[protoOpts.method](reqOpts, grpcMetadata, grpcOpts)
+        .on('status',
+          (status: GrpcResponse) => {
+            const grcpStatus = GrpcService.decorateStatus_(status);
+            stream.emit('response', grcpStatus || status);
+          })
+        .on('error', (err: GrpcResponse) => {
+          const grpcError = GrpcService.decorateError_(err);
+          stream.destroy(grpcError || err);
+        });
 
     stream.setReadable(grpcStream);
     stream.setWritable(grpcStream);
@@ -697,10 +722,15 @@ export class GrpcService extends Service {
    * @param {object} value - A Struct's Field message.
    * @return {*} - The decoded value.
    */
-  static decodeValue_(value) {
+  static decodeValue_(value: { kind?: string, structValue?: { fields?: {} }, listValue?: { values: [] } }): {} | null {
     switch (value.kind) {
       case 'structValue': {
+        if(value.structValue) {
         return GrpcService.structToObj_(value.structValue);
+        }
+        else {
+        return null;
+        }
       }
 
       case 'nullValue': {
@@ -708,10 +738,22 @@ export class GrpcService extends Service {
       }
 
       case 'listValue': {
+        if(value.listValue) {
         return value.listValue.values.map(GrpcService.decodeValue_);
+        }
+        else {
+        return null;
+        }
       }
 
-      default: { return value[value.kind]; }
+      default: {
+        if(value.kind) {
+        return (Object.getOwnPropertyDescriptor(value, value.kind) as PropertyDescriptor).value;
+        }
+        else {
+        return null;
+        }
+      }
     }
   }
 
@@ -728,7 +770,7 @@ export class GrpcService extends Service {
    * //   stringValue: 'Hello!'
    * // }
    */
-  static encodeValue_(value) {
+  static encodeValue_(value: {}) {
     return new GrpcService.ObjectToStructConverter().encodeValue_(value);
   }
 
@@ -753,7 +795,7 @@ export class GrpcService extends Service {
    * @param {error|object} err - The grpc error.
    * @return {error|null}
    */
-  static decorateError_(err: Error): Error|null {
+  static decorateError_(err: GrpcResponse): Error | null {
     const errorObj = is.error(err) ? err : {};
     return GrpcService.decorateGrpcResponse_(errorObj, err);
   }
@@ -768,9 +810,13 @@ export class GrpcService extends Service {
    * @param {object} response - The grpc response.
    * @return {object|null}
    */
-  private static decorateGrpcResponse_(obj, response) {
-    if (response && GRPC_ERROR_CODE_TO_HTTP[response.code]) {
-      const defaultResponseDetails = GRPC_ERROR_CODE_TO_HTTP[response.code];
+  private static decorateGrpcResponse_(obj: {}, response: GrpcResponse) {
+
+    if (response && GRPC_ERROR_CODE_TO_HTTP.hasOwnProperty(response.code)) {
+      const defaultResponseDetails = (Object
+        .getOwnPropertyDescriptor(GRPC_ERROR_CODE_TO_HTTP, response.code) as PropertyDescriptor)
+        .value;
+
       let message = defaultResponseDetails.message;
 
       if (response.message) {
@@ -799,7 +845,7 @@ export class GrpcService extends Service {
    * @param {object} status - The grpc status.
    * @return {object|null}
    */
-  private static decorateStatus_(status) {
+  private static decorateStatus_(status: GrpcResponse) {
     return GrpcService.decorateGrpcResponse_({}, status);
   }
 
@@ -811,7 +857,7 @@ export class GrpcService extends Service {
    * @param {object} response - The request response.
    * @return {boolean} shouldRetry
    */
-  private static shouldRetryRequest_(response) {
+  private static shouldRetryRequest_(response: GrpcResponse) {
     return [429, 500, 502, 503].indexOf(response.code) > -1;
   }
 
@@ -867,7 +913,7 @@ export class GrpcService extends Service {
    * //   }
    * // }
    */
-  private static objToStruct_(obj, options) {
+  private static objToStruct_(obj: {}, options: ObjectToStructConverterConfig) {
     return new GrpcService.ObjectToStructConverter(options).convert(obj);
   }
 
@@ -892,15 +938,23 @@ export class GrpcService extends Service {
    * //   name: 'Stephen'
    * // }
    */
-  private static structToObj_(struct) {
+  private static structToObj_(struct: { fields?: {} }) {
     const convertedObject = {};
 
+    if(struct.fields){
     for (const prop in struct.fields) {
       if (struct.fields.hasOwnProperty(prop)) {
-        const value = struct.fields[prop];
-        convertedObject[prop] = GrpcService.decodeValue_(value);
+        const value = (Object.getOwnPropertyDescriptor(struct.fields, prop) as PropertyDescriptor).value;
+        const decodeValue: PropertyDescriptor = {
+          value: GrpcService.decodeValue_(value),
+          configurable: true,
+          enumerable: true,
+          writable: true
+        };
+        Object.defineProperty(convertedObject, prop, decodeValue);
       }
     }
+  }
 
     return convertedObject;
   }
@@ -911,7 +965,7 @@ export class GrpcService extends Service {
    * @param {object} reqOpts - The request options.
    * @return {object} - The decorated request object.
    */
-  decorateRequest_(reqOpts) {
+  decorateRequest_(reqOpts: DecorateRequestOptions) {
     reqOpts = Object.assign({}, reqOpts);
 
     delete reqOpts.autoPaginate;
@@ -920,6 +974,7 @@ export class GrpcService extends Service {
 
     return replaceProjectIdToken(reqOpts, this.projectId);
   }
+
 
   /**
    * To authorize requests through gRPC, we must get the raw google-auth-library
@@ -930,16 +985,16 @@ export class GrpcService extends Service {
    * @param {function} callback - The callback function.
    * @param {?error} callback.err - An error getting an auth client.
    */
-  private getGrpcCredentials_(callback) {
-    this.authClient.getClient().then(client => {
+  private getGrpcCredentials_(callback: Function) {
+    this.authClient.getClient().then((client: Compute | UserRefreshClient | JWT) => {
       const credentials = grpc.credentials.combineChannelCredentials(
-          grpc.credentials.createSsl(),
-          grpc.credentials.createFromGoogleCredential(client));
+        grpc.credentials.createSsl(),
+        grpc.credentials.createFromGoogleCredential(client));
       if (!this.projectId || this.projectId === '{{projectId}}') {
         this.projectId = client.projectId!;
       }
       callback(null, credentials);
-    }, callback);
+    }, callback  as (reason: {})=>{});
   }
 
   /**
@@ -953,7 +1008,7 @@ export class GrpcService extends Service {
    * @return protoObject - The loaded proto object.
    */
   private loadProtoFile(protoPath: string, config: GrpcServiceConfig):
-      PackageDefinition {
+    PackageDefinition {
     const protoObjectCacheKey = [config.protosDir, protoPath].join('$');
 
     if (!GrpcService.protoObjectCache[protoObjectCacheKey]) {
@@ -980,18 +1035,24 @@ export class GrpcService extends Service {
    * @param {object} protoOpts - The proto options.
    * @return {object} service - The proto service.
    */
-  private getService_(protoOpts) {
-    const proto = this.protos[protoOpts.service];
+  private getService_(protoOpts: ProtoOpts) {
+    let proto = (Object.getOwnPropertyDescriptor(this.protos, protoOpts.service) as PropertyDescriptor).value;
+    if (protoOpts.hasOwnProperty(protoOpts.service)) {
+      proto = (Object.getOwnPropertyDescriptor(protoOpts, protoOpts.service) as
+        PropertyDescriptor)
+        .value;
+    }
     let service = this.activeServiceMap_.get(protoOpts.service);
 
     if (!service) {
-      service = new proto[protoOpts.service](
-          proto.baseUrl || this.baseUrl, this.grpcCredentials,
-          Object.assign(
-              {
-                'grpc.primary_user_agent': this.userAgent,
-              },
-              GRPC_SERVICE_OPTIONS));
+      const serviceInstance = (Object.getOwnPropertyDescriptor(proto, protoOpts.service) as PropertyDescriptor).value;
+      service = new serviceInstance(
+        proto.baseUrl || this.baseUrl, this.grpcCredentials,
+        Object.assign(
+          {
+            'grpc.primary_user_agent': this.userAgent,
+          },
+          GRPC_SERVICE_OPTIONS));
 
       this.activeServiceMap_.set(protoOpts.service, service);
     }
