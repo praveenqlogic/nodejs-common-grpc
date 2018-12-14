@@ -48,7 +48,7 @@ export class GrpcOperation extends GrpcServiceObject {
    * longrunning.operation service.
    * @param {string} name - The operation name.
    */
-  constructor(parent: GrpcService|GrpcServiceObject, name: string) {
+  constructor(parent: GrpcService|GrpcServiceObject|{}, name: string) {
     const methods = {
       /**
        * Deletes an operation.
@@ -107,7 +107,7 @@ export class GrpcOperation extends GrpcServiceObject {
    *     request.
    * @param {object} callback.apiResponse - The full API response.
    */
-  cancel(callback: (err: Error|null, apiResponse?: r.Response) => void) {
+  cancel(callback?: (err: Error|null, apiResponse?: r.Response) => void) {
     const protoOpts = {
       service: 'Operations',
       method: 'cancelOperation',
@@ -132,7 +132,7 @@ export class GrpcOperation extends GrpcServiceObject {
    *
    * @param {function} callback
    */
-  private poll_(): Promise<Metadata|null> {
+  poll_(): Promise<Metadata|null> {
     return new Promise((resolve, reject) => {
       this.getMetadata((err, resp) => {
         if (err || resp!.error) {

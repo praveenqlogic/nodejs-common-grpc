@@ -18,8 +18,9 @@ import {util} from '@google-cloud/common';
 import * as assert from 'assert';
 import {EventEmitter} from 'events';
 import * as proxyquire from 'proxyquire';
+import {GrpcOperation} from '../src/operation';
 
-let decorateErrorOverride_;
+let decorateErrorOverride_: Function;
 class FakeGrpcService {
   static decorateError_() {
     return (decorateErrorOverride_ || util.noop).apply(null, arguments);
@@ -41,11 +42,11 @@ describe('GrpcOperation', () => {
   const OPERATION_ID = '/a/b/c/d';
 
   // tslint:disable-next-line:variable-name
-  let GrpcOperation;
-  let grpcOperation;
+  let GrpcOperationtype: typeof GrpcOperation;
+  let grpcOperation: GrpcOperation;
 
   before(() => {
-    GrpcOperation =
+    GrpcOperationtype =
         proxyquire('../src/operation', {
           './service-object': {GrpcServiceObject: FakeGrpcServiceObject},
           './service': {GrpcService: FakeGrpcService}
@@ -53,8 +54,8 @@ describe('GrpcOperation', () => {
   });
 
   beforeEach(() => {
-    decorateErrorOverride_ = null;
-    grpcOperation = new GrpcOperation(FAKE_SERVICE, OPERATION_ID);
+    // decorateErrorOverride_ = null;
+    grpcOperation = new GrpcOperationtype(FAKE_SERVICE, OPERATION_ID);
   });
 
   describe('instantiation', () => {
@@ -86,7 +87,10 @@ describe('GrpcOperation', () => {
     };
 
     it('should pass GrpcServiceObject the correct config', () => {
-      const config = grpcOperation.grpcServiceObjectArguments_![0];
+      const config = (Object.getOwnPropertyDescriptor(
+                          grpcOperation, 'grpcServiceObjectArguments_') as
+                      PropertyDescriptor)
+                         .value![0];
       assert.deepStrictEqual(config, EXPECTED_CONFIG);
     });
   });
@@ -95,15 +99,16 @@ describe('GrpcOperation', () => {
     it('should provide the proper request options', done => {
       grpcOperation.id = OPERATION_ID;
 
-      grpcOperation.request = (protoOpts, reqOpts, callback) => {
-        assert.deepStrictEqual(protoOpts, {
-          service: 'Operations',
-          method: 'cancelOperation',
-        });
+      grpcOperation.request =
+          (protoOpts: {}, reqOpts: {name: string}, callback: Function) => {
+            assert.deepStrictEqual(protoOpts, {
+              service: 'Operations',
+              method: 'cancelOperation',
+            });
 
-        assert.strictEqual(reqOpts.name, OPERATION_ID);
-        callback();  // done()
-      };
+            assert.strictEqual(reqOpts.name, OPERATION_ID);
+            callback();  // done()
+          };
 
       grpcOperation.cancel(done);
     });
@@ -120,7 +125,7 @@ describe('GrpcOperation', () => {
 
   describe('poll_', () => {
     it('should call getMetdata', done => {
-      grpcOperation.getMetadata = () => {
+      grpcOperation.getMetadata = async () => {
         done();
       };
 
@@ -130,7 +135,7 @@ describe('GrpcOperation', () => {
     describe('could not get metadata', () => {
       it('should callback with an error', done => {
         const error = new Error('Error.');
-        grpcOperation.getMetadata = callback => {
+        (grpcOperation.getMetadata as Function) = (callback: Function) => {
           callback(error);
         };
         grpcOperation.poll_().then(r => {}, err => {
@@ -143,12 +148,12 @@ describe('GrpcOperation', () => {
         const apiResponse = {
           error: {},
         };
-        grpcOperation.getMetadata = callback => {
+        (grpcOperation.getMetadata as Function) = (callback: Function) => {
           callback(null, apiResponse, apiResponse);
         };
         const decoratedGrpcStatus = {};
 
-        decorateErrorOverride_ = status => {
+        decorateErrorOverride_ = (status: {}) => {
           assert.strictEqual(status, apiResponse.error);
           return decoratedGrpcStatus;
         };
@@ -163,7 +168,7 @@ describe('GrpcOperation', () => {
       const apiResponse = {done: false};
 
       beforeEach(() => {
-        grpcOperation.getMetadata = callback => {
+        (grpcOperation.getMetadata as Function) = (callback: Function) => {
           callback(null, apiResponse);
         };
       });
@@ -179,7 +184,7 @@ describe('GrpcOperation', () => {
       const apiResponse = {done: true};
 
       beforeEach(() => {
-        grpcOperation.getMetadata = callback => {
+        (grpcOperation.getMetadata as Function) = (callback: Function) => {
           callback(null, apiResponse);
         };
       });

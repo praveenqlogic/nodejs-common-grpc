@@ -37,8 +37,8 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @param {object} config - Configuration object.
    */
-  constructor(config: ServiceObjectConfig) {
-    super(config);
+  constructor(config: ServiceObjectConfig|{}) {
+    super(config as ServiceObjectConfig);
   }
 
   /**
@@ -102,7 +102,8 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @private
    */
-  request(...args: Array<{}>) {
+  // tslint:disable-next-line:no-any
+  request(...args: Array<{}>): any {
     return this.parent.request.apply(this.parent, args);
   }
 
@@ -111,7 +112,8 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @private
    */
-  requestStream(...args: Array<{}>) {
+  // tslint:disable-next-line:no-any
+  requestStream(...args: Array<{}>): any {
     return this.parent.requestStream.apply(this.parent, args);
   }
 
