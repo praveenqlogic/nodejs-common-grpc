@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-import {util} from '@google-cloud/common';
+import {util,ServiceObjectParent,GetMetadataCallback,Metadata} from '@google-cloud/common';
 import * as assert from 'assert';
 import {EventEmitter} from 'events';
 import * as proxyquire from 'proxyquire';
 import {GrpcOperation} from '../src/operation';
+
 
 let decorateErrorOverride_: Function;
 class FakeGrpcService {
@@ -39,6 +40,7 @@ describe('GrpcOperation', () => {
   const FAKE_SERVICE = {
     Promise,
   };
+  
   const OPERATION_ID = '/a/b/c/d';
 
   // tslint:disable-next-line:variable-name
@@ -135,8 +137,9 @@ describe('GrpcOperation', () => {
     describe('could not get metadata', () => {
       it('should callback with an error', done => {
         const error = new Error('Error.');
-        (grpcOperation.getMetadata as Function) = (callback: Function) => {
-          callback(error);
+
+        grpcOperation.getMetadata= async (callback?: GetMetadataCallback):Promise<Metadata> => {
+          callback!(error);
         };
         grpcOperation.poll_().then(r => {}, err => {
           assert.strictEqual(err, error);
@@ -148,8 +151,8 @@ describe('GrpcOperation', () => {
         const apiResponse = {
           error: {},
         };
-        (grpcOperation.getMetadata as Function) = (callback: Function) => {
-          callback(null, apiResponse, apiResponse);
+        grpcOperation.getMetadata =async (callback?: GetMetadataCallback):Promise<Metadata> => {
+          callback!(null, apiResponse, undefined);
         };
         const decoratedGrpcStatus = {};
 
@@ -168,8 +171,8 @@ describe('GrpcOperation', () => {
       const apiResponse = {done: false};
 
       beforeEach(() => {
-        (grpcOperation.getMetadata as Function) = (callback: Function) => {
-          callback(null, apiResponse);
+        grpcOperation.getMetadata = async (callback?: GetMetadataCallback):Promise<Metadata> => {
+          callback!(null, apiResponse);
         };
       });
 
@@ -184,8 +187,8 @@ describe('GrpcOperation', () => {
       const apiResponse = {done: true};
 
       beforeEach(() => {
-        (grpcOperation.getMetadata as Function) = (callback: Function) => {
-          callback(null, apiResponse);
+        grpcOperation.getMetadata =  async (callback?: GetMetadataCallback):Promise<Metadata> => {
+          callback!(null, apiResponse);
         };
       });
 

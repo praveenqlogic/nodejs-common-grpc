@@ -350,7 +350,7 @@ export class ObjectToStructConverter {
 
 
 export class GrpcService extends Service {
-  grpcCredentials?: {name?: string};
+  grpcCredentials?: {};
   grpcMetadata?: {add: Function};
   maxRetries?: number;
   userAgent?: string;
@@ -391,7 +391,7 @@ export class GrpcService extends Service {
     }
 
     if (config.customEndpoint) {
-      this.grpcCredentials = grpc.credentials.createInsecure() as {};
+      this.grpcCredentials = grpc.credentials.createInsecure();
     }
 
     this.grpcMetadata = new grpc.Metadata();
@@ -462,8 +462,10 @@ export class GrpcService extends Service {
    * @param {object} reqOpts - The request options.
    * @param {function=} callback - The callback function.
    */
-  request(protoOpts?: {}, reqOpts?: {}, callback?: {}): Abortable|
-      void|Promise<r.Response>;
+  request(
+    pOpts?: ProtoOpts|DecorateRequestOptions,
+    rOpts?: {},
+    callback?: Function): Abortable|void|Promise<r.Response>
   request(reqOpts: DecorateRequestOptions): Promise<r.Response>;
   request(reqOpts: DecorateRequestOptions, callback: BodyResponseCallback):
       void;
@@ -1019,7 +1021,7 @@ export class GrpcService extends Service {
    * @param {object} reqOpts - The request options.
    * @return {object} - The decorated request object.
    */
-  decorateRequest_(reqOpts: {}): DecorateRequestOptions|{};
+  decorateRequest_(reqOpts: {}):{};
   decorateRequest_(reqOpts: DecorateRequestOptions) {
     reqOpts = Object.assign({}, reqOpts);
 
@@ -1064,7 +1066,7 @@ export class GrpcService extends Service {
    * @param config - The base config for the GrpcService.
    * @return protoObject - The loaded proto object.
    */
-  loadProtoFile(protoPath: {}, config: {}): {};
+  loadProtoFile(protoPath: string, config: {}): {};
   loadProtoFile(protoPath: string, config: GrpcServiceConfig):
       PackageDefinition {
     const protoObjectCacheKey = [config.protosDir, protoPath].join('$');
@@ -1092,8 +1094,7 @@ export class GrpcService extends Service {
    *
    * @param {object} protoOpts - The proto options.
    * @return {object} service - The proto service.
-   */
-  getService_(protoOpts: {}): {};
+   */  
   getService_(protoOpts: ProtoOpts) {
     let proto = (Object.getOwnPropertyDescriptor(
                      this.protos, protoOpts.service) as PropertyDescriptor)

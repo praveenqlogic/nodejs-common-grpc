@@ -18,7 +18,7 @@
  * @module commonGrpc/operation
  */
 
-import {Metadata, ServiceObjectConfig, util} from '@google-cloud/common';
+import {Metadata, ServiceObjectConfig, util,ServiceObjectParent} from '@google-cloud/common';
 import * as r from 'request';
 
 /**
@@ -48,7 +48,7 @@ export class GrpcOperation extends GrpcServiceObject {
    * longrunning.operation service.
    * @param {string} name - The operation name.
    */
-  constructor(parent: GrpcService|GrpcServiceObject|{}, name: string) {
+  constructor(parent: Partial<ServiceObjectParent>, name: string) {
     const methods = {
       /**
        * Deletes an operation.

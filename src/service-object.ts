@@ -37,7 +37,7 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @param {object} config - Configuration object.
    */
-  constructor(config: ServiceObjectConfig|{}) {
+  constructor(config: ServiceObjectConfig) {
     super(config as ServiceObjectConfig);
   }
 
