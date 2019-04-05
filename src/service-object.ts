@@ -23,6 +23,9 @@ import {promisifyAll} from '@google-cloud/promisify';
 import * as extend from 'extend';
 import * as r from 'request';
 
+// tslint:disable-next-line no-any
+type RequestResponse = [any, r.Response];
+
 export class GrpcServiceObject extends ServiceObject {
   parent!: GrpcServiceObject;
 
@@ -102,7 +105,8 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @private
    */
-  request(...args: Array<{}>) {
+
+  request(...args: Array<{}>): Promise<RequestResponse> {
     return this.parent.request.apply(this.parent, args);
   }
 
@@ -111,7 +115,7 @@ export class GrpcServiceObject extends ServiceObject {
    *
    * @private
    */
-  requestStream(...args: Array<{}>) {
+  requestStream(...args: Array<{}>): r.Request {
     return this.parent.requestStream.apply(this.parent, args);
   }
 
