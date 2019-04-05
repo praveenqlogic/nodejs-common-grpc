@@ -14,14 +14,20 @@
  * limitations under the License.
  */
 
+import {DecorateRequestOptions, ServiceObjectConfig} from '@google-cloud/common';
 import * as pfy from '@google-cloud/promisify';
 import * as assert from 'assert';
 import * as extend from 'extend';
 import * as proxyquire from 'proxyquire';
+import * as r from 'request';
+
+import {grpc} from '../src';
+import * as serviceTypes from '../src/service';
+import * as ServiceObjectTypes from '../src/service-object';
 
 let promisified = false;
 const fakePfy = Object.assign({}, pfy, {
-  promisifyAll(klass) {
+  promisifyAll(klass: typeof ServiceObjectTypes.GrpcServiceObject) {
     if (klass.name === 'GrpcServiceObject') {
       promisified = true;
     }
@@ -37,8 +43,9 @@ class FakeServiceObject {
 
 describe('GrpcServiceObject', () => {
   // tslint:disable-next-line:variable-name
-  let GrpcServiceObject;
-  let grpcServiceObject;
+  let GrpcServiceObject: typeof ServiceObjectTypes.GrpcServiceObject;
+  // tslint:disable-next-line no-any
+  let grpcServiceObject: any;
 
   const CONFIG = {};
   const PROTO_OPTS = {};
@@ -54,7 +61,7 @@ describe('GrpcServiceObject', () => {
   });
 
   beforeEach(() => {
-    grpcServiceObject = new GrpcServiceObject(CONFIG);
+    grpcServiceObject = new GrpcServiceObject(CONFIG as ServiceObjectConfig);
 
     grpcServiceObject.methods = {
       delete: {
@@ -87,21 +94,25 @@ describe('GrpcServiceObject', () => {
 
   describe('delete', () => {
     it('should make the correct request', done => {
-      grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-        const deleteMethod = grpcServiceObject.methods.delete;
-        assert.strictEqual(protoOpts, deleteMethod.protoOpts);
-        assert.strictEqual(reqOpts, deleteMethod.reqOpts);
-        callback();  // done()
-      };
+      grpcServiceObject.request =
+          (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+           callback: Function) => {
+            const deleteMethod = grpcServiceObject.methods.delete;
+            assert.strictEqual(protoOpts, deleteMethod.protoOpts);
+            assert.strictEqual(reqOpts, deleteMethod.reqOpts);
+            callback();  // done()
+          };
 
       grpcServiceObject.delete(done);
     });
 
     it('should not require a callback', done => {
-      grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-        assert.doesNotThrow(callback);
-        done();
-      };
+      grpcServiceObject.request =
+          (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+           callback: Function) => {
+            assert.doesNotThrow(callback);
+            done();
+          };
 
       grpcServiceObject.delete();
     });
@@ -109,12 +120,14 @@ describe('GrpcServiceObject', () => {
 
   describe('getMetadata', () => {
     it('should make the correct request', done => {
-      grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-        const getMetadataMethod = grpcServiceObject.methods.getMetadata;
-        assert.strictEqual(protoOpts, getMetadataMethod.protoOpts);
-        assert.strictEqual(reqOpts, getMetadataMethod.reqOpts);
-        callback();  // done()
-      };
+      grpcServiceObject.request =
+          (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+           callback: Function) => {
+            const getMetadataMethod = grpcServiceObject.methods.getMetadata;
+            assert.strictEqual(protoOpts, getMetadataMethod.protoOpts);
+            assert.strictEqual(reqOpts, getMetadataMethod.reqOpts);
+            callback();  // done()
+          };
 
       grpcServiceObject.getMetadata(done);
     });
@@ -124,18 +137,21 @@ describe('GrpcServiceObject', () => {
       const apiResponse = {};
 
       beforeEach(() => {
-        grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-          callback(error, apiResponse);
-        };
+        grpcServiceObject.request =
+            (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+             callback: Function) => {
+              callback(error, apiResponse);
+            };
       });
 
       it('should execute callback with error & API response', done => {
-        grpcServiceObject.getMetadata((err, metadata, apiResponse_) => {
-          assert.strictEqual(err, error);
-          assert.strictEqual(metadata, null);
-          assert.strictEqual(apiResponse_, apiResponse);
-          done();
-        });
+        grpcServiceObject.getMetadata(
+            (err: Error, metadata: grpc.Metadata, apiResponse_: r.Response) => {
+              assert.strictEqual(err, error);
+              assert.strictEqual(metadata, null);
+              assert.strictEqual(apiResponse_, apiResponse);
+              done();
+            });
       });
     });
 
@@ -143,22 +159,25 @@ describe('GrpcServiceObject', () => {
       const apiResponse = {};
 
       beforeEach(() => {
-        grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-          callback(null, apiResponse);
-        };
+        grpcServiceObject.request =
+            (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+             callback: Function) => {
+              callback(null, apiResponse);
+            };
       });
 
       it('should exec callback with metadata & API response', done => {
-        grpcServiceObject.getMetadata((err, metadata, apiResponse_) => {
-          assert.ifError(err);
-          assert.strictEqual(metadata, apiResponse);
-          assert.strictEqual(apiResponse_, apiResponse);
-          done();
-        });
+        grpcServiceObject.getMetadata(
+            (err: Error, metadata: grpc.Metadata, apiResponse_: r.Response) => {
+              assert.ifError(err);
+              assert.strictEqual(metadata, apiResponse);
+              assert.strictEqual(apiResponse_, apiResponse);
+              done();
+            });
       });
 
       it('should update the metadata on the instance', done => {
-        grpcServiceObject.getMetadata(err => {
+        grpcServiceObject.getMetadata((err: Error) => {
           assert.ifError(err);
           assert.strictEqual(grpcServiceObject.metadata, apiResponse);
           done();
@@ -177,20 +196,24 @@ describe('GrpcServiceObject', () => {
 
       grpcServiceObject.methods.setMetadata.reqOpts = DEFAULT_REQ_OPTS;
 
-      grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-        assert.strictEqual(protoOpts, setMetadataMethod.protoOpts);
-        assert.deepStrictEqual(reqOpts, expectedReqOpts);
-        callback();  // done()
-      };
+      grpcServiceObject.request =
+          (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+           callback: Function) => {
+            assert.strictEqual(protoOpts, setMetadataMethod.protoOpts);
+            assert.deepStrictEqual(reqOpts, expectedReqOpts);
+            callback();  // done()
+          };
 
       grpcServiceObject.setMetadata(METADATA, done);
     });
 
     it('should not require a callback', done => {
-      grpcServiceObject.request = (protoOpts, reqOpts, callback) => {
-        assert.doesNotThrow(callback);
-        done();
-      };
+      grpcServiceObject.request =
+          (protoOpts: serviceTypes.ProtoOpts, reqOpts: DecorateRequestOptions,
+           callback: Function) => {
+            assert.doesNotThrow(callback);
+            done();
+          };
 
       grpcServiceObject.setMetadata(METADATA);
     });
