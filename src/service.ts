@@ -43,7 +43,7 @@ export interface ProtoOpts {
   stream?: Duplex;
 }
 
-interface GrpcOptions {
+export interface GrpcOptions {
   deadline?: Date;
 }
 
@@ -317,12 +317,13 @@ export class ObjectToStructConverter {
 }
 
 export class GrpcService extends Service {
-  grpcCredentials?: {};
-  grpcMetadata?: {add: Function};
+  grpcCredentials?: grpc.ChannelCredentials;
+  grpcMetadata?: grpc.Metadata;
   maxRetries?: number;
   userAgent?: string;
   activeServiceMap_ = new Map();
-  protos = {};
+  // tslint:disable-next-line no-any
+  protos: {[key: string]: any} = {};
 
   /** A cache for proto objects. */
   private static protoObjectCache: {[name: string]: PackageDefinition} = {};

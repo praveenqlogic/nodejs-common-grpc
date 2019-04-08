@@ -15,6 +15,7 @@
  */
 
 import {util} from '@google-cloud/common';
+import {DecorateRequestOptions, PackageJson} from '@google-cloud/common/build/src/util';
 import {replaceProjectIdToken} from '@google-cloud/projectify';
 import * as grpcProtoLoader from '@grpc/proto-loader';
 import * as assert from 'assert';
@@ -23,21 +24,35 @@ import * as extend from 'extend';
 import * as grpc from 'grpc';
 import * as is from 'is';
 import * as proxyquire from 'proxyquire';
+import * as r from 'request';
 import * as retryRequest from 'retry-request';
 import * as sn from 'sinon';
+import {Transform} from 'stream';
 import * as through from 'through2';
+
+import * as serviceTypes from '../src/service';
+
 
 const sinon = sn.createSandbox();
 const glob = global as {} as {GCLOUD_SANDBOX_ENV: boolean | {}};
 
 let getUserAgentFromPackageJsonOverride: Function|null;
 const fakeUtil = Object.assign({}, util, {
-  getUserAgentFromPackageJson: (...args) => {
-    return (getUserAgentFromPackageJsonOverride ||
-            util.getUserAgentFromPackageJson)
-        .apply(null, args);
-  }
+  getUserAgentFromPackageJson:
+      (...args: Array<{name: string, version: string}>) => {
+        return (getUserAgentFromPackageJsonOverride ||
+                util.getUserAgentFromPackageJson)
+            .apply(null, args);
+      }
 });
+
+class GrpcMetadata {
+  add(prop: string, val: grpc.MetadataValue) {
+    this[prop] = val;
+  }
+  // tslint:disable-next-line no-any
+  [key: string]: any;
+}
 
 class FakeService {
   calledWith_: IArguments;
@@ -46,13 +61,18 @@ class FakeService {
   }
 }
 
-let replaceProjectIdTokenOverride;
+class ProtoService {}
+interface ProtoService {
+  method: Function;
+}
+
+let replaceProjectIdTokenOverride: Function;
 function fakeReplaceProjectIdTokenOverride() {
   return (replaceProjectIdTokenOverride || replaceProjectIdToken)
       .apply(null, arguments);
 }
 
-let retryRequestOverride;
+let retryRequestOverride: Function|null;
 function fakeRetryRequest() {
   return (retryRequestOverride || retryRequest).apply(null, arguments);
 }
@@ -67,7 +87,7 @@ class FakeMetadata {
 }
 
 // tslint:disable-next-line:variable-name
-let GrpcMetadataOverride;
+let GrpcMetadataOverride: typeof grpc.Metadata|null;
 let grpcProtoLoadOverride: (typeof grpcProtoLoader.loadSync)|null = null;
 const fakeGrpc = {
   Metadata: FakeMetadata,
@@ -108,13 +128,14 @@ const fakeGrpcProtoLoader = {
 
 describe('GrpcService', () => {
   // tslint:disable-next-line:variable-name
-  let GrpcServiceCached;
-  // tslint:disable-next-line:variable-name
-  let GrpcService;
-  let grpcService;
+  let GrpcServiceCached: typeof serviceTypes.GrpcService;
+  // tslint:disable-next-line:variable-name no-any
+  let GrpcService: any;
+  // tslint:disable-next-line no-any
+  let grpcService: any;
 
   // tslint:disable-next-line:variable-name
-  let ObjectToStructConverter;
+  let ObjectToStructConverter: typeof serviceTypes.ObjectToStructConverter;
 
   const ROOT_DIR = '/root/dir';
   const PROTO_FILE_PATH = 'filepath.proto';
@@ -136,7 +157,7 @@ describe('GrpcService', () => {
     grpcMetadata: {
       property: 'value',
     },
-  };
+  } as {} as serviceTypes.GrpcServiceConfig;
 
   const OPTIONS = {
     maxRetries: 3,
@@ -301,15 +322,13 @@ describe('GrpcService', () => {
     it('should set insecure credentials if using customEndpoint', () => {
       const config = Object.assign({}, CONFIG, {customEndpoint: true});
       const grpcService = new GrpcService(config, OPTIONS);
-      assert.strictEqual(grpcService.grpcCredentials.name, 'createInsecure');
+      assert.strictEqual(
+          (grpcService.grpcCredentials! as {} as Function).name,
+          'createInsecure');
     });
 
     it('should default grpcMetadata to empty metadata', () => {
-      GrpcMetadataOverride = class {
-        add(prop, val) {
-          this[prop] = val;
-        }
-      };
+      GrpcMetadataOverride = GrpcMetadata as typeof grpc.Metadata;
 
       const fakeGrpcMetadata = Object.assign(
           new GrpcMetadataOverride(),
@@ -326,11 +345,7 @@ describe('GrpcService', () => {
     });
 
     it('should create and localize grpcMetadata', () => {
-      GrpcMetadataOverride = class {
-        add(prop, val) {
-          this[prop] = val;
-        }
-      };
+      GrpcMetadataOverride = GrpcMetadata as typeof grpc.Metadata;
 
       const fakeGrpcMetadata = Object.assign(
           new GrpcMetadataOverride(),
@@ -351,7 +366,7 @@ describe('GrpcService', () => {
     it('should set the correct user-agent', () => {
       const userAgent = 'user-agent/0.0.0';
 
-      getUserAgentFromPackageJsonOverride = packageJson => {
+      getUserAgentFromPackageJsonOverride = (packageJson: PackageJson) => {
         assert.strictEqual(packageJson, CONFIG.packageJson);
         return userAgent;
       };
@@ -424,6 +439,7 @@ describe('GrpcService', () => {
       };
 
       const decodedValue = {};
+
       sinon.stub(GrpcService, 'structToObj_').returns(decodedValue);
       assert.strictEqual(GrpcService.decodeValue_(structValue), decodedValue);
     });
@@ -471,7 +487,7 @@ describe('GrpcService', () => {
       sinon.stub(GrpcService, 'ObjectToStructConverter').callsFake(options_ => {
         assert.strictEqual(options_, options);
         return {
-          convert(obj_) {
+          convert(obj_: {}) {
             assert.strictEqual(obj_, obj);
             return convertedObject;
           },
@@ -509,8 +525,9 @@ describe('GrpcService', () => {
     const REQ_OPTS = {reqOpts: true};
     const GRPC_CREDENTIALS = {};
 
-    function ProtoService() {}
-    ProtoService.prototype.method = () => {};
+    class ProtoService {
+      method = () => {};
+    }
 
     beforeEach(() => {
       grpcService.grpcCredentials = GRPC_CREDENTIALS;
@@ -529,7 +546,7 @@ describe('GrpcService', () => {
     it('should access the specified service proto object', done => {
       retryRequestOverride = util.noop;
 
-      grpcService.getService_ = protoOpts => {
+      grpcService.getService_ = (protoOpts: serviceTypes.ProtoOpts) => {
         assert.strictEqual(protoOpts, PROTO_OPTS);
         setImmediate(done);
         return ProtoService;
@@ -558,13 +575,13 @@ describe('GrpcService', () => {
         const error = new Error('Error.');
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             callback(error);
           };
         });
 
         it('should execute callback with error', done => {
-          grpcService.request(PROTO_OPTS, REQ_OPTS, err => {
+          grpcService.request(PROTO_OPTS, REQ_OPTS, (err: Error) => {
             assert.strictEqual(err, error);
             done();
           });
@@ -575,7 +592,7 @@ describe('GrpcService', () => {
         const authClient = {};
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             callback(null, authClient);
           };
         });
@@ -593,27 +610,30 @@ describe('GrpcService', () => {
     });
 
     describe('retry strategy', () => {
-      let retryRequestReqOpts;
-      let retryRequestOptions;
-      let retryRequestCallback;
+      let retryRequestReqOpts: DecorateRequestOptions;
+      let retryRequestOptions: retryRequest.Options;
+      let retryRequestCallback: Function;
 
       beforeEach(() => {
-        retryRequestOverride = (reqOpts, options, callback) => {
-          retryRequestReqOpts = reqOpts;
-          retryRequestOptions = options;
-          retryRequestCallback = callback;
-        };
+        retryRequestOverride =
+            (reqOpts: DecorateRequestOptions, options: retryRequest.Options,
+             callback: Function) => {
+              retryRequestReqOpts = reqOpts;
+              retryRequestOptions = options;
+              retryRequestCallback = callback;
+            };
       });
 
       it('should use retry-request', done => {
         const error = {};
         const response = {};
 
-        grpcService.request(PROTO_OPTS, REQ_OPTS, (err, resp) => {
-          assert.strictEqual(err, error);
-          assert.strictEqual(resp, response);
-          done();
-        });
+        grpcService.request(
+            PROTO_OPTS, REQ_OPTS, (err: Error, resp: r.Response) => {
+              assert.strictEqual(err, error);
+              assert.strictEqual(resp, response);
+              done();
+            });
 
         assert.strictEqual(retryRequestReqOpts, null);
         assert.strictEqual(retryRequestOptions.retries, grpcService.maxRetries);
@@ -625,7 +645,8 @@ describe('GrpcService', () => {
       it('should retry on 429, 500, 502, and 503', () => {
         grpcService.request(PROTO_OPTS, REQ_OPTS, assert.ifError);
 
-        const shouldRetryFn = retryRequestOptions.shouldRetryFn;
+        const shouldRetryFn = retryRequestOptions.shouldRetryFn as (res: {}) =>
+                                  boolean;
 
         const retryErrors =
             [{code: 429}, {code: 500}, {code: 502}, {code: 503}];
@@ -647,7 +668,9 @@ describe('GrpcService', () => {
 
         grpcService.getService_ = () => {
           return {
-            method(reqOpts, metadata, grpcOpts, callback) {
+            method(
+                reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                grpcOpts: serviceTypes.GrpcOptions, callback: Function) {
               callback(grpcError500);
             },
           };
@@ -655,13 +678,14 @@ describe('GrpcService', () => {
 
         grpcService.request(PROTO_OPTS, REQ_OPTS, assert.ifError);
 
-        const onResponse = (err, resp) => {
+        const onResponse = (err: Error, resp: r.Response) => {
           assert.strictEqual(err, null);
           assert.deepStrictEqual(resp, GrpcService.GRPC_ERROR_CODE_TO_HTTP[2]);
           done();
         };
 
-        retryRequestOptions.request({}, onResponse);
+        retryRequestOptions.request!
+            ({} as (r.UriOptions & r.CoreOptions), onResponse);
       });
 
       it('should return grpc request', () => {
@@ -676,8 +700,8 @@ describe('GrpcService', () => {
         };
 
         grpcService.request(PROTO_OPTS, REQ_OPTS, assert.ifError);
-
-        const request = retryRequestOptions.request();
+        // tslint:disable-next-line no-any
+        const request = (retryRequestOptions as any).request();
         assert.strictEqual(request, grpcRequest);
       });
 
@@ -686,21 +710,27 @@ describe('GrpcService', () => {
 
         grpcService.getService_ = () => {
           return {
-            method(reqOpts, metadata, grpcOpts, callback) {
+            method(
+                reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                grpcOpts: serviceTypes.GrpcOptions, callback: Function) {
               callback(grpcError500);
             },
           };
         };
 
-        grpcService.request(PROTO_OPTS, REQ_OPTS, (err, resp) => {
-          assert.deepStrictEqual(err, GrpcService.GRPC_ERROR_CODE_TO_HTTP[2]);
-          assert.strictEqual(resp, null);
-          done();
-        });
+        grpcService.request(
+            PROTO_OPTS, REQ_OPTS, (err: Error, resp: r.Response) => {
+              assert.deepStrictEqual(
+                  err, GrpcService.GRPC_ERROR_CODE_TO_HTTP[2]);
+              assert.strictEqual(resp, null);
+              done();
+            });
 
         // When the gRPC error is passed to "onResponse", it will just invoke
         // the callback passed to retry-request. We will check if the grpc Error
-        retryRequestOptions.request({}, retryRequestCallback);
+        retryRequestOptions.request!
+            ({} as (r.UriOptions & r.CoreOptions),
+             retryRequestCallback as r.RequestCallback);
       });
 
       it('should exec callback with unknown error', done => {
@@ -708,21 +738,26 @@ describe('GrpcService', () => {
 
         grpcService.getService_ = () => {
           return {
-            method(reqOpts, metadata, grpcOpts, callback) {
+            method(
+                reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                grpcOpts: serviceTypes.GrpcOptions, callback: Function) {
               callback(unknownError, null);
             },
           };
         };
 
-        grpcService.request(PROTO_OPTS, REQ_OPTS, (err, resp) => {
-          assert.strictEqual(err, unknownError);
-          assert.strictEqual(resp, null);
-          done();
-        });
+        grpcService.request(
+            PROTO_OPTS, REQ_OPTS, (err: Error, resp: r.Response) => {
+              assert.strictEqual(err, unknownError);
+              assert.strictEqual(resp, null);
+              done();
+            });
 
         // When the gRPC error is passed to "onResponse", it will just invoke
         // the callback passed to retry-request. We will check if the grpc Error
-        retryRequestOptions.request({}, retryRequestCallback);
+        retryRequestOptions.request!
+            ({} as (r.UriOptions & r.CoreOptions),
+             retryRequestCallback as r.RequestCallback);
       });
     });
 
@@ -731,14 +766,14 @@ describe('GrpcService', () => {
         it('should decorate the request', done => {
           const decoratedRequest = {};
 
-          grpcService.decorateRequest_ = reqOpts => {
+          grpcService.decorateRequest_ = (reqOpts: DecorateRequestOptions) => {
             assert.deepStrictEqual(reqOpts, REQ_OPTS);
             return decoratedRequest;
           };
 
           grpcService.getService_ = () => {
             return {
-              method(reqOpts) {
+              method(reqOpts: DecorateRequestOptions) {
                 assert.strictEqual(reqOpts, decoratedRequest);
                 done();
               },
@@ -757,7 +792,7 @@ describe('GrpcService', () => {
             throw error;
           };
 
-          grpcService.request(PROTO_OPTS, REQ_OPTS, err => {
+          grpcService.request(PROTO_OPTS, REQ_OPTS, (err: Error) => {
             assert.strictEqual(err, error);
             done();
           });
@@ -769,7 +804,7 @@ describe('GrpcService', () => {
       it('should make the correct request on the service', done => {
         grpcService.getService_ = () => {
           return {
-            method(reqOpts) {
+            method(reqOpts: DecorateRequestOptions) {
               assert.deepStrictEqual(reqOpts, REQ_OPTS);
               done();
             },
@@ -782,7 +817,7 @@ describe('GrpcService', () => {
       it('should pass the grpc metadata with the request', done => {
         grpcService.getService_ = () => {
           return {
-            method(reqOpts, metadata) {
+            method(reqOpts: DecorateRequestOptions, metadata: grpc.Metadata) {
               assert.strictEqual(metadata, grpcService.grpcMetadata);
               done();
             },
@@ -800,11 +835,13 @@ describe('GrpcService', () => {
 
         grpcService.getService_ = () => {
           return {
-            method(reqOpts, metadata, grpcOpts) {
+            method(
+                reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                grpcOpts: serviceTypes.GrpcOptions) {
               assert(is.date(grpcOpts.deadline));
 
-              assert(grpcOpts.deadline.getTime() > expectedDeadlineRange[0]);
-              assert(grpcOpts.deadline.getTime() < expectedDeadlineRange[1]);
+              assert(grpcOpts.deadline!.getTime() > expectedDeadlineRange[0]);
+              assert(grpcOpts.deadline!.getTime() < expectedDeadlineRange[1]);
 
               done();
             },
@@ -824,15 +861,18 @@ describe('GrpcService', () => {
 
             grpcService.getService_ = () => {
               return {
-                method(reqOpts, metadata, grpcOpts, callback) {
+                method(
+                    reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                    grpcOpts: serviceTypes.GrpcOptions, callback: Function) {
                   callback(grpcError);
                 },
               };
             };
 
-            grpcService.request(PROTO_OPTS, REQ_OPTS, err => {
-              assert.strictEqual(err.code, httpError.code);
-            });
+            grpcService.request(
+                PROTO_OPTS, REQ_OPTS, (err: grpc.ServiceError) => {
+                  assert.strictEqual(err.code, httpError.code);
+                });
           }
           /*jshint loopfunc:false */
         });
@@ -844,7 +884,9 @@ describe('GrpcService', () => {
         beforeEach(() => {
           grpcService.getService_ = () => {
             return {
-              method(reqOpts, metadata, grpcOpts, callback) {
+              method(
+                  reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+                  grpcOpts: serviceTypes.GrpcOptions, callback: Function) {
                 callback(null, RESPONSE);
               },
             };
@@ -852,23 +894,25 @@ describe('GrpcService', () => {
         });
 
         it('should execute callback with response', done => {
-          grpcService.request(PROTO_OPTS, REQ_OPTS, (err, resp) => {
-            assert.ifError(err);
-            assert.strictEqual(resp, RESPONSE);
-            done();
-          });
+          grpcService.request(
+              PROTO_OPTS, REQ_OPTS, (err: Error, resp: r.Response) => {
+                assert.ifError(err);
+                assert.strictEqual(resp, RESPONSE);
+                done();
+              });
         });
       });
     });
   });
 
   describe('requestStream', () => {
-    let PROTO_OPTS;
+    let PROTO_OPTS: serviceTypes.ProtoOpts;
     const REQ_OPTS = {};
     const GRPC_CREDENTIALS = {};
-    let fakeStream;
+    // tslint:disable-next-line no-any
+    let fakeStream: any;
 
-    function ProtoService() {}
+    // function ProtoService() { }
 
     beforeEach(() => {
       PROTO_OPTS = {service: 'service', method: 'method', timeout: 3000};
@@ -914,16 +958,17 @@ describe('GrpcService', () => {
         const error = new Error('err');
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             callback(error);
           };
         });
 
         it('should execute callback with error', done => {
-          grpcService.requestStream(PROTO_OPTS, REQ_OPTS).on('error', err => {
-            assert.strictEqual(err, error);
-            done();
-          });
+          grpcService.requestStream(PROTO_OPTS, REQ_OPTS)
+              .on('error', (err: Error) => {
+                assert.strictEqual(err, error);
+                done();
+              });
         });
       });
 
@@ -931,7 +976,7 @@ describe('GrpcService', () => {
         const authClient = {};
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             callback(null, authClient);
           };
         });
@@ -949,7 +994,7 @@ describe('GrpcService', () => {
     });
 
     it('should get the proto service', done => {
-      grpcService.getService_ = protoOpts => {
+      grpcService.getService_ = (protoOpts: serviceTypes.ProtoOpts) => {
         assert.strictEqual(protoOpts, PROTO_OPTS);
         setImmediate(done);
         return new ProtoService();
@@ -962,21 +1007,23 @@ describe('GrpcService', () => {
       const createDeadline = GrpcService.createDeadline_;
       const fakeDeadline = createDeadline(PROTO_OPTS.timeout);
 
-      GrpcService.createDeadline_ = timeout => {
+      GrpcService.createDeadline_ = (timeout: number) => {
         assert.strictEqual(timeout, PROTO_OPTS.timeout);
         return fakeDeadline;
       };
 
-      ProtoService.prototype.method = (reqOpts, metadata, grpcOpts) => {
-        assert.strictEqual(grpcOpts.deadline, fakeDeadline);
+      ProtoService.prototype.method =
+          (reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+           grpcOpts: serviceTypes.GrpcOptions) => {
+            assert.strictEqual(grpcOpts.deadline, fakeDeadline);
 
-        GrpcService.createDeadline_ = createDeadline;
-        setImmediate(done);
+            GrpcService.createDeadline_ = createDeadline;
+            setImmediate(done);
 
-        return through.obj();
-      };
+            return through.obj();
+          };
 
-      retryRequestOverride = (_, retryOpts) => {
+      retryRequestOverride = (_: {}, retryOpts: {request: Function}) => {
         return retryOpts.request();
       };
 
@@ -984,13 +1031,14 @@ describe('GrpcService', () => {
     });
 
     it('should pass the grpc metadata with the request', done => {
-      ProtoService.prototype.method = (reqOpts, metadata) => {
-        assert.strictEqual(metadata, grpcService.grpcMetadata);
-        setImmediate(done);
-        return through.obj();
-      };
+      ProtoService.prototype.method =
+          (reqOpts: DecorateRequestOptions, metadata: grpc.Metadata) => {
+            assert.strictEqual(metadata, grpcService.grpcMetadata);
+            setImmediate(done);
+            return through.obj();
+          };
 
-      retryRequestOverride = (_, retryOpts) => {
+      retryRequestOverride = (_: {}, retryOpts: {request: Function}) => {
         return retryOpts.request();
       };
 
@@ -1003,21 +1051,22 @@ describe('GrpcService', () => {
           return through.obj();
         };
 
-        retryRequestOverride = (reqOpts, options) => {
-          return options.request();
-        };
+        retryRequestOverride =
+            (reqOpts: DecorateRequestOptions, options: {request: Function}) => {
+              return options.request();
+            };
       });
 
       describe('requestStream() success', () => {
         it('should decorate the request', done => {
           const decoratedRequest = {};
 
-          grpcService.decorateRequest_ = reqOpts => {
+          grpcService.decorateRequest_ = (reqOpts: DecorateRequestOptions) => {
             assert.strictEqual(reqOpts, REQ_OPTS);
             return decoratedRequest;
           };
 
-          ProtoService.prototype.method = reqOpts => {
+          ProtoService.prototype.method = (reqOpts: DecorateRequestOptions) => {
             assert.strictEqual(reqOpts, decoratedRequest);
             setImmediate(done);
             return through.obj();
@@ -1036,28 +1085,31 @@ describe('GrpcService', () => {
             throw error;
           };
 
-          grpcService.requestStream(PROTO_OPTS, REQ_OPTS).on('error', err => {
-            assert.strictEqual(err, error);
-            done();
-          });
+          grpcService.requestStream(PROTO_OPTS, REQ_OPTS)
+              .on('error', (err: Error) => {
+                assert.strictEqual(err, error);
+                done();
+              });
         });
       });
     });
 
     describe('retry strategy', () => {
-      let retryRequestReqOpts;
-      let retryRequestOptions;
-      let retryStream;
+      let retryRequestReqOpts: DecorateRequestOptions|null;
+      let retryRequestOptions: retryRequest.Options|null;
+      let retryStream: Transform;
 
       beforeEach(() => {
         retryRequestReqOpts = retryRequestOptions = null;
         retryStream = through.obj();
 
-        retryRequestOverride = (reqOpts, options) => {
-          retryRequestReqOpts = reqOpts;
-          retryRequestOptions = options;
-          return retryStream;
-        };
+        retryRequestOverride =
+            (reqOpts: DecorateRequestOptions,
+             options: retryRequest.Options) => {
+              retryRequestReqOpts = reqOpts;
+              retryRequestOptions = options;
+              return retryStream;
+            };
       });
 
       afterEach(() => {
@@ -1074,11 +1126,13 @@ describe('GrpcService', () => {
         grpcService.requestStream(PROTO_OPTS, reqOpts);
 
         assert.strictEqual(retryRequestReqOpts, null);
-        assert.strictEqual(retryRequestOptions.retries, grpcService.maxRetries);
-        assert.strictEqual(retryRequestOptions.currentRetryAttempt, 0);
-        assert.strictEqual(retryRequestOptions.objectMode, true);
         assert.strictEqual(
-            retryRequestOptions.shouldRetryFn, GrpcService.shouldRetryRequest_);
+            retryRequestOptions!.retries, grpcService.maxRetries);
+        assert.strictEqual(retryRequestOptions!.currentRetryAttempt, 0);
+        assert.strictEqual(retryRequestOptions!.objectMode, true);
+        assert.strictEqual(
+            retryRequestOptions!.shouldRetryFn,
+            GrpcService.shouldRetryRequest_);
       });
 
       it('should emit the metadata event as a response event', done => {
@@ -1088,9 +1142,10 @@ describe('GrpcService', () => {
           return fakeStream;
         };
 
-        retryRequestOverride = (reqOpts, options) => {
-          return options.request();
-        };
+        retryRequestOverride =
+            (reqOpts: DecorateRequestOptions, options: {request: Function}) => {
+              return options.request();
+            };
 
         fakeStream.on('error', done).on('response', resp => {
           assert.deepStrictEqual(resp, GrpcService.GRPC_ERROR_CODE_TO_HTTP[0]);
@@ -1115,7 +1170,7 @@ describe('GrpcService', () => {
         const grpcError500 = {code: 2};
         const requestStream = grpcService.requestStream(PROTO_OPTS, REQ_OPTS);
 
-        requestStream.destroy = err => {
+        requestStream.destroy = (err: Error) => {
           assert.deepStrictEqual(err, GrpcService.GRPC_ERROR_CODE_TO_HTTP[2]);
           done();
         };
@@ -1126,11 +1181,16 @@ describe('GrpcService', () => {
   });
 
   describe('requestWritableStream', () => {
-    let PROTO_OPTS;
+    let PROTO_OPTS: serviceTypes.ProtoOpts;
     const REQ_OPTS = {};
     const GRPC_CREDENTIALS = {};
 
-    function ProtoService() {}
+    class ProtoService {}
+    interface ProtoService {
+      method: Function;
+    }
+
+
 
     beforeEach(() => {
       PROTO_OPTS = {service: 'service', method: 'method', timeout: 3000};
@@ -1164,7 +1224,7 @@ describe('GrpcService', () => {
         // tslint:disable-next-line:no-any
         return (duplexify as any).obj();
       };
-      grpcService.getService_ = protoOpts => {
+      grpcService.getService_ = (protoOpts: serviceTypes.ProtoOpts) => {
         assert.strictEqual(protoOpts, PROTO_OPTS);
         setImmediate(done);
         return new ProtoService();
@@ -1177,21 +1237,23 @@ describe('GrpcService', () => {
       const createDeadline = GrpcService.createDeadline_;
       const fakeDeadline = createDeadline(PROTO_OPTS.timeout);
 
-      GrpcService.createDeadline_ = timeout => {
+      GrpcService.createDeadline_ = (timeout: number) => {
         assert.strictEqual(timeout, PROTO_OPTS.timeout);
         return fakeDeadline;
       };
 
-      ProtoService.prototype.method = (reqOpts, metadata, grpcOpts) => {
-        assert.strictEqual(grpcOpts.deadline, fakeDeadline);
+      ProtoService.prototype.method =
+          (reqOpts: DecorateRequestOptions, metadata: grpc.Metadata,
+           grpcOpts: serviceTypes.GrpcOptions) => {
+            assert.strictEqual(grpcOpts.deadline, fakeDeadline);
 
-        GrpcService.createDeadline_ = createDeadline;
-        setImmediate(done);
+            GrpcService.createDeadline_ = createDeadline;
+            setImmediate(done);
 
-        return through.obj();
-      };
+            return through.obj();
+          };
 
-      retryRequestOverride = (_, retryOpts) => {
+      retryRequestOverride = (_: {}, retryOpts: {request: Function}) => {
         return retryOpts.request();
       };
 
@@ -1199,13 +1261,14 @@ describe('GrpcService', () => {
     });
 
     it('should pass the grpc metadata with the request', done => {
-      ProtoService.prototype.method = (reqOpts, metadata) => {
-        assert.strictEqual(metadata, grpcService.grpcMetadata);
-        setImmediate(done);
-        return through.obj();
-      };
+      ProtoService.prototype.method =
+          (reqOpts: DecorateRequestOptions, metadata: grpc.Metadata) => {
+            assert.strictEqual(metadata, grpcService.grpcMetadata);
+            setImmediate(done);
+            return through.obj();
+          };
 
-      retryRequestOverride = (_, retryOpts) => {
+      retryRequestOverride = (_: {}, retryOpts: {request: Function}) => {
         return retryOpts.request();
       };
 
@@ -1221,7 +1284,7 @@ describe('GrpcService', () => {
         const error = new Error('err');
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             setImmediate(() => {
               callback(error);
             });
@@ -1230,7 +1293,7 @@ describe('GrpcService', () => {
 
         it('should execute callback with error', done => {
           grpcService.requestWritableStream(PROTO_OPTS, REQ_OPTS)
-              .on('error', err => {
+              .on('error', (err: Error) => {
                 assert.strictEqual(err, error);
                 done();
               });
@@ -1241,7 +1304,7 @@ describe('GrpcService', () => {
         const authClient = {};
 
         beforeEach(() => {
-          grpcService.getGrpcCredentials_ = callback => {
+          grpcService.getGrpcCredentials_ = (callback: Function) => {
             callback(null, authClient);
           };
         });
@@ -1269,21 +1332,22 @@ describe('GrpcService', () => {
           return through.obj();
         };
 
-        retryRequestOverride = (reqOpts, options) => {
-          return options.request();
-        };
+        retryRequestOverride =
+            (reqOpts: DecorateRequestOptions, options: {request: Function}) => {
+              return options.request();
+            };
       });
 
       describe('requestWritableStream() success', () => {
         it('should decorate the request', done => {
           const decoratedRequest = {};
 
-          grpcService.decorateRequest_ = reqOpts => {
+          grpcService.decorateRequest_ = (reqOpts: DecorateRequestOptions) => {
             assert.strictEqual(reqOpts, REQ_OPTS);
             return decoratedRequest;
           };
 
-          ProtoService.prototype.method = reqOpts => {
+          ProtoService.prototype.method = (reqOpts: DecorateRequestOptions) => {
             assert.strictEqual(reqOpts, decoratedRequest);
             setImmediate(done);
             return through.obj();
@@ -1302,7 +1366,7 @@ describe('GrpcService', () => {
           };
 
           grpcService.requestWritableStream(PROTO_OPTS, REQ_OPTS)
-              .on('error', err => {
+              .on('error', (err: Error) => {
                 assert.strictEqual(err, error);
                 done();
               });
@@ -1315,9 +1379,10 @@ describe('GrpcService', () => {
 
       beforeEach(() => {
         delete grpcService.grpcCredentials;
-        grpcService.getGrpcCredentials_ = callback => {
+        grpcService.getGrpcCredentials_ = (callback: Function) => {
           callback(null, authClient);
         };
+
         sinon.spy(GrpcService, 'decorateStatus_');
       });
 
@@ -1334,7 +1399,7 @@ describe('GrpcService', () => {
 
         grpcService.requestWritableStream(PROTO_OPTS, REQ_OPTS)
             .on('response',
-                status => {
+                (status: string) => {
                   assert.strictEqual(status, 'foo');
                   assert.strictEqual(GrpcService.decorateStatus_.callCount, 1);
                   assert(GrpcService.decorateStatus_.calledWith('foo'));
@@ -1354,7 +1419,7 @@ describe('GrpcService', () => {
 
       beforeEach(() => {
         delete grpcService.grpcCredentials;
-        grpcService.getGrpcCredentials_ = callback => {
+        grpcService.getGrpcCredentials_ = (callback: Function) => {
           callback(null, authClient);
         };
       });
@@ -1379,7 +1444,7 @@ describe('GrpcService', () => {
 
         const stream = grpcService.requestWritableStream(PROTO_OPTS, REQ_OPTS);
 
-        stream.on('error', err => {
+        stream.on('error', (err: Error) => {
           assert.strictEqual(err, expectedDecoratedError);
           assert.strictEqual(GrpcService.decorateError_.callCount, 1);
           assert(GrpcService.decorateError_.calledWith(error));
@@ -1403,7 +1468,7 @@ describe('GrpcService', () => {
         const error = new Error('Error.');
         sinon.stub(GrpcService, 'decorateError_').returns(null!);
         const stream = grpcService.requestWritableStream(PROTO_OPTS, REQ_OPTS);
-        stream.on('error', err => {
+        stream.on('error', (err: Error) => {
           assert.strictEqual(err, error);
           assert.strictEqual(GrpcService.decorateError_.callCount, 1);
           assert(GrpcService.decorateError_.calledWith(error));
@@ -1423,7 +1488,7 @@ describe('GrpcService', () => {
       const obj = {};
       const convertedObject = {};
       sinon.stub(GrpcService, 'ObjectToStructConverter').returns({
-        encodeValue_(obj_) {
+        encodeValue_(obj_: {}) {
           assert.strictEqual(obj_, obj);
           return convertedObject;
         },
@@ -1434,7 +1499,7 @@ describe('GrpcService', () => {
 
   describe('createDeadline_', () => {
     const nowTimestamp = Date.now();
-    let now;
+    let now: () => number;
 
     before(() => {
       now = Date.now;
@@ -1607,11 +1672,12 @@ describe('GrpcService', () => {
 
       const replacedReqOpts = {};
 
-      replaceProjectIdTokenOverride = (reqOpts_, projectId) => {
-        assert.deepStrictEqual(reqOpts_, reqOpts);
-        assert.strictEqual(projectId, grpcService.projectId);
-        return replacedReqOpts;
-      };
+      replaceProjectIdTokenOverride =
+          (reqOpts_: DecorateRequestOptions, projectId: string) => {
+            assert.deepStrictEqual(reqOpts_, reqOpts);
+            assert.strictEqual(projectId, grpcService.projectId);
+            return replacedReqOpts;
+          };
 
       assert.strictEqual(
           grpcService.decorateRequest_(reqOpts), replacedReqOpts);
@@ -1641,7 +1707,7 @@ describe('GrpcService', () => {
       });
 
       it('should execute callback with error', done => {
-        grpcService.getGrpcCredentials_(err => {
+        grpcService.getGrpcCredentials_((err: Error) => {
           assert.strictEqual(err, error);
           done();
         });
@@ -1662,26 +1728,32 @@ describe('GrpcService', () => {
       });
 
       it('should return grpcCredentials', done => {
-        grpcService.getGrpcCredentials_((err, grpcCredentials) => {
-          assert.ifError(err);
+        grpcService.getGrpcCredentials_(
+            (err: Error, grpcCredentials: {
+              name: string,
+              args: Array<{name: string, args: Array<{}>}>
+            }) => {
+              assert.ifError(err);
 
-          assert.strictEqual(grpcCredentials.name, 'combineChannelCredentials');
+              assert.strictEqual(
+                  grpcCredentials.name, 'combineChannelCredentials');
 
-          const createSslArg = grpcCredentials.args[0];
-          assert.strictEqual(createSslArg.name, 'createSsl');
-          assert.deepStrictEqual(createSslArg.args.length, 0);
+              const createSslArg = grpcCredentials.args[0];
+              assert.strictEqual(createSslArg.name, 'createSsl');
+              assert.deepStrictEqual(createSslArg.args.length, 0);
 
-          const createFromGoogleCredentialArg = grpcCredentials.args[1];
-          assert.strictEqual(
-              createFromGoogleCredentialArg.name, 'createFromGoogleCredential');
-          assert.strictEqual(
-              createFromGoogleCredentialArg.args[0], AUTH_CLIENT);
-          done();
-        });
+              const createFromGoogleCredentialArg = grpcCredentials.args[1];
+              assert.strictEqual(
+                  createFromGoogleCredentialArg.name,
+                  'createFromGoogleCredential');
+              assert.strictEqual(
+                  createFromGoogleCredentialArg.args[0], AUTH_CLIENT);
+              done();
+            });
       });
 
       it('should set projectId', done => {
-        grpcService.getGrpcCredentials_(err => {
+        grpcService.getGrpcCredentials_((err: Error) => {
           assert.ifError(err);
           assert.strictEqual(grpcService.projectId, AUTH_CLIENT.projectId);
           done();
@@ -1691,7 +1763,7 @@ describe('GrpcService', () => {
       it('should not change projectId that was already set', done => {
         grpcService.projectId = 'project-id';
 
-        grpcService.getGrpcCredentials_(err => {
+        grpcService.getGrpcCredentials_((err: Error) => {
           assert.ifError(err);
           assert.strictEqual(grpcService.projectId, AUTH_CLIENT.projectId);
           done();
@@ -1701,7 +1773,7 @@ describe('GrpcService', () => {
       it('should change placeholder projectId', done => {
         grpcService.projectId = '{{projectId}}';
 
-        grpcService.getGrpcCredentials_(err => {
+        grpcService.getGrpcCredentials_((err: Error) => {
           assert.ifError(err);
           assert.strictEqual(grpcService.projectId, AUTH_CLIENT.projectId);
           done();
@@ -1719,7 +1791,7 @@ describe('GrpcService', () => {
           },
         };
 
-        grpcService.getGrpcCredentials_(err => {
+        grpcService.getGrpcCredentials_((err: Error) => {
           assert.ifError(err);
           assert.strictEqual(grpcService.projectId, grpcService.projectId);
           done();
@@ -1798,7 +1870,9 @@ describe('GrpcService', () => {
       grpcService.protos = {
         Service: {
           Service: class Service {
-            constructor(baseUrl, grpcCredentials, userAgent) {
+            constructor(
+                baseUrl: string, grpcCredentials: grpc.ChannelCredentials,
+                userAgent: string) {
               assert.strictEqual(baseUrl, grpcService.baseUrl);
               assert.strictEqual(grpcCredentials, grpcService.grpcCredentials);
               assert.deepStrictEqual(
@@ -1850,7 +1924,7 @@ describe('GrpcService', () => {
         Service: {
           baseUrl: fakeBaseUrl,
           Service: class Service{
-            constructor(baseUrl) {
+            constructor(baseUrl: string) {
               assert.strictEqual(baseUrl, fakeBaseUrl);
               return fakeService;
             }
@@ -1864,10 +1938,12 @@ describe('GrpcService', () => {
   });
 
   describe('ObjectToStructConverter', () => {
-    let objectToStructConverter;
+    // tslint:disable-next-line no-any
+    let objectToStructConverter: any;
 
     beforeEach(() => {
-      objectToStructConverter = new ObjectToStructConverter(OPTIONS);
+      objectToStructConverter = new ObjectToStructConverter(
+          OPTIONS as serviceTypes.ObjectToStructConverterConfig);
     });
 
     describe('instantiation', () => {
@@ -1903,7 +1979,7 @@ describe('GrpcService', () => {
         const inputValue = {};
         const convertedValue = {};
 
-        objectToStructConverter.encodeValue_ = value => {
+        objectToStructConverter.encodeValue_ = (value: {}) => {
           assert.strictEqual(value, inputValue);
           return convertedValue;
         };
@@ -1941,13 +2017,13 @@ describe('GrpcService', () => {
 
       it('should add seen objects to set then empty set', done => {
         const obj = {};
-        let objectAdded;
+        let objectAdded: {};
 
         objectToStructConverter.seenObjects = {
-          add(obj) {
+          add(obj: {}) {
             objectAdded = obj;
           },
-          delete (obj_) {
+          delete (obj_: {}) {
             assert.strictEqual(obj_, obj);
             assert.strictEqual(objectAdded, obj);
             done();
@@ -2008,7 +2084,7 @@ describe('GrpcService', () => {
         it('should convert objects', () => {
           const convertedValue = {};
 
-          objectToStructConverter.convert = value => {
+          objectToStructConverter.convert = (value: {}) => {
             assert.strictEqual(value, VALUE);
             return convertedValue;
           };
@@ -2033,7 +2109,8 @@ describe('GrpcService', () => {
           });
 
           describe('options.removeCircular', () => {
-            let objectToStructConverter;
+            // tslint:disable-next-line no-any
+            let objectToStructConverter: any;
 
             beforeEach(() => {
               objectToStructConverter = new ObjectToStructConverter({
@@ -2053,7 +2130,8 @@ describe('GrpcService', () => {
       });
 
       describe('options.stringify', () => {
-        let objectToStructConverter;
+        // tslint:disable-next-line no-any
+        let objectToStructConverter: any;
 
         beforeEach(() => {
           objectToStructConverter = new ObjectToStructConverter({
